@@ -40,6 +40,8 @@ def test():
         for step in range(args.max_episode_len):
             # 获取动作（测试时不加噪声）
             actions = maddpg.get_actions(observations, noise=False)
+
+            print(step, actions)
             
             # 环境交互
             next_observations, rewards, dones, infos = env.step(actions)
