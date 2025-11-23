@@ -116,6 +116,7 @@ class MADDPGAgent:
         total_action_dim = action_dim * n_agents
         self.critic = Critic(total_obs_dim, total_action_dim, args.hidden_dim)
         self.target_critic = Critic(total_obs_dim, total_action_dim, args.hidden_dim)
+        # 采用Adam优化器
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.critic_lr)
         
         # 自动将模型移动到最佳设备
@@ -138,6 +139,7 @@ class MADDPGAgent:
     
     def soft_update(self, target, source, tau):
         """软更新目标网络"""
+        # 本质上Critic和target Critic是一个东西，只是使用软更新的方法能够提高稳定性
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
     
@@ -159,7 +161,7 @@ class MADDPGAgent:
         
         # 添加探索噪声
         if noise:
-            noise_val = np.random.normal(0, 0.1, self.action_dim)
+            noise_val = np.random.normal(0, self.args.exploration_noise, self.action_dim)
             action = np.clip(action + noise_val, -1.0, 1.0)
         
         return action.astype(np.float32)
@@ -202,16 +204,17 @@ class MADDPGAgent:
             target_actions = torch.cat(target_actions, dim=1)
             
             # 计算目标Q值
-            target_q = self.target_critic(all_next_states, target_actions).squeeze()  # (batch_size,)
-            target_q = rewards[:, self.agent_id] + self.args.gamma * (1 - dones[:, self.agent_id]) * target_q
+            next_q = self.target_critic(all_next_states, target_actions).squeeze()  # (batch_size,)
+            target_q = rewards[:, self.agent_id] + self.args.gamma * (1 - dones[:, self.agent_id]) * next_q
         
         # 计算当前Q值
-        current_q = self.critic(all_states, all_actions).squeeze()  # (batch_size,)
+        current_q = self.critic(all_states, all_actions)  # (batch_size,)
         critic_loss = F.mse_loss(current_q, target_q)
         
         # 更新Critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        # 进行梯度裁剪
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
         
