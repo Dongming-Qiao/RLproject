@@ -1,0 +1,59 @@
+# QMIX算法配置 - SMACv2环境
+
+# 环境配置
+env:
+  name: "SMACv2"
+  scenario: "10gen_terran"  # 默认场景，可根据需要修改为2s3z、3s5z等
+  obs_dim: 82     # 观测维度，根据具体场景调整
+  state_dim: 120   # 状态维度，根据具体场景调整  
+  action_dim: 11   # 动作维度
+  n_agents: 5     # 智能体数量，根据具体场景调整
+  episode_limit: 100  # episode最大步数
+
+# 算法超参数
+algorithm:
+  name: "qmix"
+  lr: 0.0005      # 学习率
+  gamma: 0.99     # 折扣因子
+  epsilon_start: 1.0    # 初始探索率
+  epsilon_min: 0.05     # 最小探索率
+  epsilon_decay: 0.999  # 探索率衰减
+  batch_size: 32        # 批次大小
+  buffer_size: 5000     # 回放缓冲区大小
+  target_update_interval: 200  # 目标网络更新间隔
+  grad_norm_clip: 10    # 梯度裁剪阈值
+
+# 网络结构
+network:
+  agent:
+    rnn_hidden_dim: 64  # RNN隐藏层维度
+    fc_hidden_dim: 64   # 全连接层隐藏维度
+  mixer:
+    embedding_dim: 32   # 混合网络嵌入维度
+    hypernet_hidden_dim: 64  # 超网络隐藏维度
+
+# 训练配置
+training:
+  total_episodes: 10000    # 总训练episode数
+  evaluate_interval: 100   # 评估间隔
+  save_interval: 1000      # 模型保存间隔
+  log_interval: 100        # 日志记录间隔
+
+# 评估配置
+evaluation:
+  eval_episodes: 20        # 评估时运行的episode数
+  eval_epsilon: 0.0        # 评估时的探索率
+
+# 实验跟踪
+logging:
+  use_wandb: true          # 是否使用Weights & Biases
+  project_name: "marl-smacv2"
+  run_name: "qmix-3m"      # 实验运行名称
+  save_results: true       # 是否保存结果
+  plot_interval: 500       # 绘图间隔
+
+# 路径配置
+paths:
+  model_dir: "models/qmix"
+  result_dir: "results/qmix"
+  config_dir: "configs"

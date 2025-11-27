@@ -1,0 +1,33 @@
+# 基础科学计算
+numpy>=1.19.0
+
+# SMACv2环境 - 不需要了
+# smac==2.0.0
+# absl-py>=0.1.0
+# PySC2>=3.0.0
+# pysc2
+# s2clientprotocol
+
+# 渲染和可视化
+pygame>=2.0.0
+opencv-python>=4.5.0
+matplotlib>=3.3.0
+
+# 配置和日志
+wandb>=0.12.0
+pyyaml>=5.4.0
+gym>=0.21.0
+
+# PyTorch - 根据容器环境选择
+# 选项1: CPU版本 (适用于无GPU的容器)
+torch>=1.9.0
+
+# 选项2: GPU版本 (适用于有CUDA的容器)
+# torch>=1.9.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
+
+# 选项3: 预编译的wheel (最稳定，推荐)
+# 下载对应版本的.whl文件后安装，例如:
+# torch==1.9.0+cu111
+
+# 清华源的指令
+# pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple

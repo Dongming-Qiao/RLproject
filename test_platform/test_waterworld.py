@@ -7,7 +7,7 @@ def waterworld_demo():
         n_pursuers=2,
         n_evaders=4,
         n_poisons=3,
-        n_coop=1,
+        n_coop=2,
         max_cycles=500
     )
     
@@ -20,6 +20,8 @@ def waterworld_demo():
     
     step_count = 0
     max_steps = 300
+
+    rewards = {agent: 0 for agent in env.possible_agents}
     
     # 使用 env.agent_iter() 作为主循环
     for agent in env.agent_iter():
@@ -28,12 +30,19 @@ def waterworld_demo():
             
         obs, reward, termination, truncation, info = env.last()
 
+        count = 0   # 计数器
+
+        for a in env.agents:
+            print(f"agent {a} reward: {env.rewards[a]}")
+
+        print("----")
+
         # #打印观测信息的形状
         # print(f"{agent} 观测形状: {obs.shape}")
         # #数据结构类型
         # print(f"{agent} 观测数据类型: {type(obs)}")
 
-        # #打印奖励形状和数据结构类型
+        #打印奖励形状和数据结构类型
         # print(f"{agent} 奖励: {reward}, 数据类型: {type(reward)}")
 
         # #打印info形状和数据结构类型
@@ -42,14 +51,19 @@ def waterworld_demo():
         if termination or truncation:
             action = None
             print(f"{agent} 已终止或截断，传递 None 动作")
+            break
         else:
             # 随机
             action = env.action_space(agent).sample()
 
-        # #打印动作形状和数据结构类型
+        #打印动作形状和数据结构类型
         # print(f"{agent} 动作: {action}, 数据类型: {type(action)}")
         
-        env.step(action)
+        # 迭代，并获取信息
+        next_res = env.step(action)
+
+        # 打印信息
+        # print(f"next_res is:{next_res}")
         
         # 打印信息（可选，避免输出太多）
         if step_count % 50 == 0:
