@@ -21,58 +21,83 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
+import smacv2_selfplay_inject
 # --- SMACv2 import (assumes installed in venv) ---
 from smacv2.env.starcraft2.wrapper import StarCraftCapabilityEnvWrapper
+from smacv2.env import StarCraft2Env
+#from smac_hard.env import StarCraft2Env
+from s2clientprotocol import debug_pb2 as d_pb
+from smacv2_selfplay_inject import create_policy_opponent
+
 
 # --------------------------
 # Hyperparameters / Config
 # --------------------------
 DEFAULT_CONFIG = {
-    "map_name": "10gen_terran",
-    "capability_config": {
-        "n_units": 5,
-        "n_enemies": 5,
+"map_name": "10gen_terran",
+        "capability_config": {
+        "n_units": 8,
+        "n_enemies": 8,
         "team_gen": {
             "dist_type": "weighted_teams",
-            "unit_types": ["marine", "marauder", "medivac"],
-            "exception_unit_types": ["medivac"],
-            "weights": [0.45, 0.45, 0.1],
+            "unit_types": ["marine"],
+            "exception_unit_types": [],
+            "weights": [1],
             "observe": True,
         },
         "start_positions": {
             "dist_type": "surrounded_and_reflect",
-            "p": 0.5,
-            "n_enemies": 5,
+            "p": 0,
+            "n_enemies": 8,
             "map_x": 32,
             "map_y": 32,
         },
     },
     "conic_fov": False,
-    "obs_own_pos": True,
-    "use_unit_ranges": True,
+    "obs_own_pos": False,
+    "use_unit_ranges": False,
     "min_attack_range": 2,
 
     # RL hyperparams
-    "rollout_steps": 512,          # T
+    "rollout_steps": 128,          # T
     "ppo_epochs": 5,               # K
-    "minibatch_size": 8000,
+    "minibatch_size": 256,
     "gamma": 0.99,
     "gae_lambda": 0.95,
-    "clip_eps": 0.2,
+    "clip_eps": 0.1,
     "lr": 5e-4,
-    "value_coef": 0.5,
+    "value_coef": 0.25,
     "ent_coef": 0.01,
     "max_grad_norm": 10.0,
-    "total_episodes": 5000,
-    "save_interval": 100,         # save every N episodes
-    "log_interval": 1,
+    "total_episodes": 200000,
+    "save_interval": 100,
+    "log_interval": 10,
     "eval_interval": 200,
     "seed": 1,
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "model_dir": "models",
     "tb_dir": "runs",
 }
+
+
+def _kill_all_units_fixed(self):
+    units_alive = [
+        unit.tag for unit in self.agents.values() if unit.health > 0
+    ] + [
+        unit.tag for unit in self.enemies.values() if unit.health > 0
+    ]
+    if units_alive:
+        debug_command = [
+            d_pb.DebugCommand(kill_unit=d_pb.DebugKillUnit(tag=units_alive))
+        ]
+        self._controller.debug(debug_command)
+    self._controller.step(2)
+    self._obs = self._controller.observe()
+
+StarCraft2Env._kill_all_units = _kill_all_units_fixed
+
 
 # --------------------------
 # Utilities
@@ -104,7 +129,7 @@ class Actor(nn.Module):
         # obs: [B, obs_dim]
         logits = self.net(obs)
         if action_mask is not None:
-            # mask: 1=available, 0=not
+            # mask: 1=available, 0=notF
             logits = logits.masked_fill(action_mask == 0, -1e10)
         return logits  # [B, n_actions]
 
@@ -112,9 +137,11 @@ class CentralizedCritic(nn.Module):
     def __init__(self, state_dim, n_agents, hidden=64):
         # critic input will be state concatenated with agent one-hot (state_dim + n_agents)
         super().__init__()
+        #self.input_dim = state_dim + obs_dim * n_agents + n_agents
         self.input_dim = state_dim + n_agents
         self.net = nn.Sequential(
             nn.Linear(self.input_dim, hidden),
+            nn.LayerNorm(hidden), 
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
@@ -191,17 +218,18 @@ class RolloutBuffer:
             last_gae = delta + gamma * lam * next_nonterminal * last_gae
             advantages[t] = last_gae
 
-        reward_arr = np.array(self.rewards, dtype=np.float32)  # shape [T, n_agents]
-        reward_mean = reward_arr.mean()
-        reward_std = reward_arr.std() + 1e-8
-        reward_arr = (reward_arr - reward_mean) / reward_std
-        self.rewards = reward_arr.tolist()
+        # reward_arr = np.array(self.rewards, dtype=np.float32)  # shape [T, n_agents]
+        # reward_mean = reward_arr.mean()
+        # reward_std = reward_arr.std() + 1e-8
+        # reward_arr = (reward_arr - reward_mean) / reward_std
+        # self.rewards = reward_arr.tolist()
 
         # compute normalized returns
-        returns = advantages + np.array(self.values)
-        returns_mean = returns.mean()
-        returns_std = returns.std() + 1e-8
-        self.returns = ((returns - returns_mean) / returns_std).tolist()
+        # returns = advantages + np.array(self.values)
+        # returns_mean = returns.mean()
+        # returns_std = returns.std() + 1e-8
+        # self.returns = ((returns - returns_mean) / returns_std).tolist()
+        self.returns = (advantages + np.array(self.values)).tolist()
         self.advantages = advantages  # can optionally normalize advantage
 
     def get_tensors(self):
@@ -220,7 +248,8 @@ class RolloutBuffer:
             raise RuntimeError("RolloutBuffer.get_tensors() called but buffer is empty. Did you collect data?")
 
         # obs: shape [T, n_agents, obs_dim] -> flatten to [T*n_agents, obs_dim]
-        obs_arr = np.stack(self.obs, axis=0)
+        #obs_arr = np.stack(self.obs, axis=0)
+        obs_arr = np.stack(self.obs)
         obs_flat = obs_arr.reshape(-1, self.obs_dim)
 
         # states: [T, state_dim] -> repeat per agent -> [T*n_agents, state_dim]
@@ -233,6 +262,13 @@ class RolloutBuffer:
 
         # state_agent concatenation
         state_agent_flat = np.concatenate([states_rep, agent_ids_rep], axis=1)
+        # obs_arr = np.stack(self.obs)                     # [T, n, obs_dim]
+        # obs_flat_joint = obs_arr.reshape(T, -1)          # [T, n*obs_dim]
+        # obs_rep = np.repeat(obs_flat_joint, self.n_agents, axis=0)
+
+        # state_agent_flat = np.concatenate(
+        #     [states_rep, obs_rep, agent_ids_rep], axis=1
+        # )
 
         # actions, masks, logprobs, returns, advantages: stack and flatten per agent
         actions_arr = np.stack(self.actions, axis=0).reshape(-1)        # [T*n]
@@ -270,6 +306,7 @@ class MAPPO:
 
         # networks
         self.actor = Actor(obs_dim, n_actions).to(self.device)
+        #self.critic = CentralizedCritic(state_dim, obs_dim, n_agents).to(self.device)
         self.critic = CentralizedCritic(state_dim, n_agents).to(self.device)
 
         # optimizer
@@ -300,14 +337,26 @@ class MAPPO:
         # critic values: we need per-agent values using global state injected later in train loop
         return actions.detach().cpu().numpy(), logp.detach().cpu().numpy()
 
-    def compute_values_for_step(self, state_np):
-        # returns per-agent values for a given state by repeating state and feeding agent one-hots
+    def compute_values_for_step(self, state_np, obs_np):
+        #returns per-agent values for a given state by repeating state and feeding agent one-hots
         state = torch.tensor(state_np, dtype=torch.float32, device=self.device).unsqueeze(0)  # [1, state_dim]
         states_rep = state.repeat(self.n_agents, 1)  # [n_agents, state_dim]
         agent_ids = torch.eye(self.n_agents, device=self.device)
+        
         state_agent = torch.cat([states_rep, agent_ids], dim=1)  # [n_agents, state_dim + n_agents]
         values = self.critic(state_agent)  # [n_agents]
         return values.detach().cpu().numpy()
+    
+        # state = torch.tensor(state_np, dtype=torch.float32, device=self.device)
+        # obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
+
+        # state_rep = state.unsqueeze(0).repeat(self.n_agents, 1)
+        # obs_flat = obs.reshape(1, -1).repeat(self.n_agents, 1)
+        # agent_ids = torch.eye(self.n_agents, device=self.device)
+
+        # critic_input = torch.cat([state_rep, obs_flat, agent_ids], dim=1)
+        # values = self.critic(critic_input)
+        # return values.detach().cpu().numpy()
 
     def update(self, buffer: RolloutBuffer, cfg):
         tensors = buffer.get_tensors()
@@ -351,10 +400,24 @@ class MAPPO:
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 # value loss
-                values_pred = self.critic(mb_state_agent)  # [M]
-                value_loss = ((mb_returns - values_pred) ** 2).mean()
+                # values_pred = self.critic(mb_state_agent)  # [M]
+                # value_loss = ((mb_returns - values_pred) ** 2).mean()
+                mb_values_old = values_flat[mb_inds]
+
+                values_pred = self.critic(mb_state_agent)
+                values_pred_clipped = mb_values_old + torch.clamp(
+                    values_pred - mb_values_old,
+                    -self.clip_eps,
+                    self.clip_eps
+                )
+
+                value_loss = torch.max(
+                    (mb_returns - values_pred) ** 2,
+                    (mb_returns - values_pred_clipped) ** 2
+                ).mean()
 
                 entropy = dist.entropy().mean()
+
 
                 loss = policy_loss + self.value_coef * value_loss - self.ent_coef * entropy
 
@@ -398,30 +461,75 @@ def train(cfg):
     set_seed(cfg["seed"])
     device = torch.device(cfg["device"])
     ensure_dir(cfg["model_dir"])
-    writer = SummaryWriter(cfg["tb_dir"])
+    #writer = SummaryWriter(cfg["tb_dir"])
+    timestamp = datetime.now().strftime("%m%d_%H%M")
+    run_name = f"MAPPO_testing_10mimport_{timestamp}"
 
-    # Build env
-    env = StarCraftCapabilityEnvWrapper(
-        capability_config=cfg["capability_config"],
-        map_name=cfg["map_name"],
-        debug=False,
-        conic_fov=cfg["conic_fov"],
-        obs_own_pos=cfg["obs_own_pos"],
-        use_unit_ranges=cfg["use_unit_ranges"],
-        min_attack_range=cfg["min_attack_range"],
+    opponent_fn = create_policy_opponent(
+        actor_class=Actor,
+        checkpoint_path="models/mappo_ep100.pt",
+        device="cuda"
     )
 
+    writer = SummaryWriter(f"runs/{run_name}")
+    # Build env
+    # env = StarCraftCapabilityEnvWrapper(
+    #     capability_config=cfg["capability_config"],
+    #     map_name=cfg["map_name"],
+    #     debug=False,
+    #     conic_fov=cfg["conic_fov"],
+    #     obs_own_pos=cfg["obs_own_pos"],
+    #     use_unit_ranges=cfg["use_unit_ranges"],
+    #     min_attack_range=cfg["min_attack_range"],
+    # )
+
+    # env = StarCraft2Env(
+    #     map_name=cfg["map_name"],
+    #     conic_fov=cfg["conic_fov"],
+    #     obs_own_pos=cfg["obs_own_pos"],
+    #     use_unit_ranges=cfg["use_unit_ranges"],
+    #     min_attack_range=cfg["min_attack_range"]
+    # )
+
+    # env = StarCraft2Env(
+    #     map_name="8m",
+    #     self_play=True,
+    #     opponent_type="heuristic",   # NEW: "heuristic", "random", or "nothing"
+    # )
+
+    # env = StarCraft2Env(
+    #     map_name="8m",
+    #     self_play=True,
+    #     opponent_type=opponent_fn  # Pass the policy function
+    # )
+
+    # env = StarCraft2Env(
+    #     map_name="8m",
+    #     self_play=False,      # Use SC2 AI
+    #     difficulty="7"        # 1=VeryEasy, 7=VeryHard, A=CheatInsane
+    # )
+
+    env = StarCraftCapabilityEnvWrapper(
+        map_name="10gen_terran",
+        capability_config=cfg["capability_config"],
+        self_play=False,
+    )
+    #print("ENV CREATED")
+
     env_info = env.get_env_info()
+    #print("GOT ENV INFO")
     n_agents = env_info["n_agents"]
     n_actions = env_info["n_actions"]
     obs_dim = env_info["obs_shape"]
     state_dim = env_info["state_shape"]
 
-    print(f"Env: agents={n_agents}, actions={n_actions}, obs_dim={obs_dim}, state_dim={state_dim}")
+    #print(f"Env: agents={n_agents}, actions={n_actions}, obs_dim={obs_dim}, state_dim={state_dim}")
     agent = MAPPO(obs_dim, state_dim, n_actions, n_agents, cfg)
+    #print("AGENT CREATED")
 
     buffer = RolloutBuffer(cfg["rollout_steps"], n_agents, obs_dim, state_dim, n_actions, device)
     buffer.device = device
+    #print("BUFFER CREATED")
 
     reward_history = []
     win_history = []
@@ -432,13 +540,22 @@ def train(cfg):
     start_time = time.time()
 
     for episode in range(1, cfg["total_episodes"] + 1):
+        #print(f"EPISODE {episode} STARTING")
         # reset env
         obs_list = None
         state = None
+        #print("CALLING RESET...")
         env.reset()
+        #print("RESET DONE")
         terminated = False
         episode_reward = 0.0
         episode_won = False
+        # if episode < 500:
+        #     cfg["ent_coef"] = 0.05
+        # elif episode < 1000:
+        #     cfg["ent_coef"] = 0.02
+        # else:
+        #     cfg["ent_coef"] = 0.005
 
         step = 0
         # collect rollout up to rollout_steps or until done
@@ -447,19 +564,31 @@ def train(cfg):
             state = env.get_state()     # global state
             masks = [env.get_avail_agent_actions(i) for i in range(n_agents)]
 
-            obs_arr = np.stack(obs)     # [n_agents, obs_dim]
-            masks_arr = np.stack(masks)
+            # obs_arr = np.stack(obs)     # [n_agents, obs_dim]
+            # masks_arr = np.stack(masks)
 
-            # select action & logp
-            actions, logps = agent.select_action(obs_arr, masks_arr)  # actions: [n_agents], logps: [n_agents]
+            # # select action & logp
+            # actions, logps = agent.select_action(obs_arr, masks_arr)  # actions: [n_agents], logps: [n_agents]
 
+            #change
+            obs_arr = np.stack(obs)  # [n_agents, obs_dim]
+            # Normalize observations per feature
+            obs_mean = obs_arr.mean(axis=0, keepdims=True)
+            obs_std = obs_arr.std(axis=0, keepdims=True) + 1e-8
+            obs_arr = (obs_arr - obs_mean) / obs_std
+
+            masks_arr = np.stack(masks)  # keep action masks
+            actions, logps = agent.select_action(obs_arr, masks_arr)
             # step environment with actions (list or np array)
             reward, terminated, info = env.step(actions)
             # In SMACv2 wrapper, reward returned is team reward (scalar). Convert to per-agent
             per_agent_reward = np.array([reward] * n_agents, dtype=np.float32)
+            
+            # scaled_reward = reward * 0.5
+            # per_agent_reward = np.array([scaled_reward] * n_agents, dtype=np.float32)
 
             # compute critic values for this state (per-agent)
-            values = agent.compute_values_for_step(state)  # [n_agents]
+            values = agent.compute_values_for_step(state, obs_arr)  # [n_agents]
 
             # store in buffer
             buffer.add(obs_arr, state, actions, masks_arr, logps, per_agent_reward, terminated, values)
@@ -470,19 +599,21 @@ def train(cfg):
             episode_won = bool(info.get("battle_won", episode_won))
             step += 1
             total_steps += 1
+            
 
         # bootstrap value for last state (for GAE)
         if not terminated:
-            last_values = agent.compute_values_for_step(env.get_state())  # [n_agents]
+            last_values = agent.compute_values_for_step(env.get_state(), obs_arr)  # [n_agents]
         else:
             last_values = np.zeros(n_agents, dtype=np.float32)
 
         # compute advantages & returns
         buffer.compute_gae(last_values, gamma=cfg["gamma"], lam=cfg["gae_lambda"])
         
-        adv_mean = buffer.advantages.mean()
-        adv_std = buffer.advantages.std() + 1e-8
-        buffer.advantages = (buffer.advantages - adv_mean) / adv_std
+        # normalize advantages per rollout
+        # adv_mean = buffer.advantages.mean()
+        # adv_std = buffer.advantages.std() + 1e-8
+        # buffer.advantages = (buffer.advantages - adv_mean) / adv_std
 
         # perform PPO update
         metrics = agent.update(buffer, cfg)
@@ -498,6 +629,8 @@ def train(cfg):
         win_history.append(int(episode_won))
         ep_rewards_window.append(episode_reward)
         ep_wins_window.append(int(episode_won))
+
+
 
         writer.add_scalar("train/episode_reward", episode_reward, episode)
         writer.add_scalar("train/episode_win", int(episode_won), episode)
@@ -515,12 +648,27 @@ def train(cfg):
 
         # save models periodically
         if episode % cfg["save_interval"] == 0:
-            ckpt_path = os.path.join(cfg["model_dir"], f"mappo_ep{episode}.pt")
+            ckpt_path = os.path.join(cfg["model_dir"], f"opponent_ep{episode}.pt")
             agent.save(ckpt_path)
             print(f"Saved checkpoint: {ckpt_path}")
 
+            # opponent_fn = create_policy_opponent(
+            #     actor_class=Actor,
+            #     checkpoint_path=f"models/opponent_ep{episode}.pt",
+            #     device=cfg["device"]
+            # )
+            
+            # # Recreate env with new opponent
+            # env.close()
+            # env = StarCraft2Env(
+            #     map_name="8m",
+            #     self_play=True,
+            #     opponent_type=opponent_fn
+            # )
+
         # reset buffer for next episode
         buffer.clear()
+        #print("finished episode {episode}")
 
         # optional evaluation loop (not implemented here) could be added at cfg["eval_interval"]
 
